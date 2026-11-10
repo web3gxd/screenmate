@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Скринмейт">
+  <!-- Optically adjusted for the Windows notification area. -->
+  <defs>
+    <linearGradient id="mint" x1="2" y1="1" x2="30" y2="32" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7cf6d1"/><stop offset="1" stop-color="#35ddb5"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="30" x2="30" y2="1" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#377cf6"/><stop offset="1" stop-color="#69aeff"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M11.2 3.6H8.4a4.8 4.8 0 0 0-4.8 4.8v2.8" stroke="url(#mint)"/>
+    <path d="M20.8 3.6h2.8a4.8 4.8 0 0 1 4.8 4.8v2.8" stroke="url(#blue)"/>
+    <path d="M3.6 20.8v2.8a4.8 4.8 0 0 0 4.8 4.8h2.8" stroke="url(#blue)"/>
+    <path d="M28.4 20.8v2.8a4.8 4.8 0 0 1-4.8 4.8h-2.8" stroke="url(#mint)"/>
+  </g>
+  <circle cx="16" cy="17" r="7.15" fill="url(#mint)"/>
+  <g fill="#071923">
+    <rect x="12.8" y="14.8" width="1.9" height="3.1" rx=".95"/>
+    <rect x="17.3" y="14.8" width="1.9" height="3.1" rx=".95"/>
+  </g>
+  <path d="M14 19.3c1.2 1.6 2.8 1.6 4 0" fill="none" stroke="#071923" stroke-width="1.35" stroke-linecap="round"/>
+  <g fill="none" stroke="url(#blue)" stroke-width="1.8" stroke-linecap="round">
+    <path d="M20.2 10.3l.6-1.5M22.4 11.6l1.1-1.1M23.7 13.7l1.5-.6"/>
+  </g>
+</svg>

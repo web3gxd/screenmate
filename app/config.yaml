@@ -1,0 +1,23 @@
+# Совпадение без учёта регистра по заголовку окна или имени исполняемого файла.
+# Дополняйте под свои приложения; содержимое браузерных вкладок определяется только по заголовку окна.
+# Выбор приложений в интерфейсе хранится отдельно в blocked-apps.yaml рядом с этим файлом.
+# Оба списка действуют одновременно; базовые правила здесь интерфейс не удаляет.
+blocked_titles:
+  - "1password"
+  - "bitwarden"
+  - "keepass"
+  - "банков"
+  - "bank"
+  - "telegram"
+  - "whatsapp"
+  - "signal"
+blocked_processes:
+  - "1password.exe"
+  - "bitwarden.exe"
+  - "keepass.exe"
+  - "telegram.exe"
+  - "whatsapp.exe"
+  - "signal.exe"
+ring_size: 5
+jpeg_quality: 70
+max_width: 1920

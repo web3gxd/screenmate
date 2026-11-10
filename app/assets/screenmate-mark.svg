@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Скринмейт — дружелюбный экран</title>
+  <defs>
+    <linearGradient id="mint" x1="80" y1="68" x2="374" y2="438" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7CF6D1"/>
+      <stop offset="1" stop-color="#35DDB5"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="115" y1="420" x2="400" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#377CF6"/>
+      <stop offset="1" stop-color="#69AEFF"/>
+    </linearGradient>
+    <mask id="face">
+      <circle cx="256" cy="268" r="78" fill="white"/>
+      <rect x="221" y="245" width="19" height="29" rx="9.5" fill="black"/>
+      <rect x="272" y="245" width="19" height="29" rx="9.5" fill="black"/>
+      <path d="M242 285c8 11 20 11 28 0" fill="none" stroke="black" stroke-width="11" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g fill="none" stroke-width="34" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M202 113h-42c-26 0-47 21-47 47v42" stroke="url(#mint)"/>
+    <path d="M310 113h42c26 0 47 21 47 47v42" stroke="url(#blue)"/>
+    <path d="M113 310v42c0 26 21 47 47 47h42" stroke="url(#blue)"/>
+    <path d="M399 310v42c0 26-21 47-47 47h-42" stroke="url(#mint)"/>
+  </g>
+  <circle cx="256" cy="268" r="78" fill="url(#mint)" mask="url(#face)"/>
+  <g fill="none" stroke="url(#blue)" stroke-width="16" stroke-linecap="round">
+    <path d="M299 181l6-16"/>
+    <path d="M322 197l12-12"/>
+    <path d="M338 221l16-6"/>
+  </g>
+</svg>

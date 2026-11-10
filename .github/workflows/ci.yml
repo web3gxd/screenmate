@@ -1,0 +1,24 @@
+name: Windows checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test the application
+        run: cargo test --locked --manifest-path app/Cargo.toml
+      - name: Test the MCP server
+        run: cargo test --locked --manifest-path mcp_server/Cargo.toml
+      - name: Build the MCP server for integration tests
+        run: cargo build --locked --manifest-path mcp_server/Cargo.toml
+      - name: Test the MCP transport
+        run: node --test tests/mcp.test.mjs
