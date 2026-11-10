@@ -56,20 +56,66 @@ fn authorised_socket(info:&Value,token:&str)->TcpStream {
     stream
 }
 
-/// Inspect the Windows DACL as SDDL without displaying it or any secrets.
-fn dacl(path:&Path)->String {
+/// Compare binary SIDs because Windows may serialize well-known accounts as SDDL aliases.
+fn assert_user_only_dacl(path: &Path, expected_sid: &str, protected: bool) {
     use std::ffi::c_void;
+    const SE_DACL_PROTECTED: u16 = 0x1000;
+    const ACL_SIZE_INFORMATION_CLASS: u32 = 2;
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    #[repr(C)]
+    struct AclSizeInformation {
+        ace_count: u32,
+        bytes_in_use: u32,
+        bytes_free: u32,
+    }
+    #[repr(C)]
+    struct AccessAllowedAce {
+        ace_type: u8,
+        flags: u8,
+        size: u16,
+        mask: u32,
+        sid_start: u32,
+    }
     #[link(name="advapi32")] extern "system" {
         fn GetNamedSecurityInfoW(name:*mut u16,object_type:u32,information:u32,owner:*mut *mut c_void,group:*mut *mut c_void,dacl:*mut *mut c_void,sacl:*mut *mut c_void,descriptor:*mut *mut c_void)->u32;
-        fn ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor:*const c_void,revision:u32,information:u32,text:*mut *mut u16,length:*mut u32)->i32;
+        fn GetSecurityDescriptorControl(descriptor: *const c_void, control: *mut u16, revision: *mut u32) -> i32;
+        fn GetAclInformation(acl: *const c_void, information: *mut AclSizeInformation, size: u32, class: u32) -> i32;
+        fn GetAce(acl: *const c_void, index: u32, ace: *mut *mut AccessAllowedAce) -> i32;
+        fn ConvertStringSidToSidW(text: *const u16, sid: *mut *mut c_void) -> i32;
+        fn EqualSid(left: *const c_void, right: *const c_void) -> i32;
     }
     #[link(name="kernel32")] extern "system" {fn LocalFree(memory:isize)->isize;}
+    struct LocalAllocation(*mut c_void);
+    impl Drop for LocalAllocation {
+        fn drop(&mut self) { unsafe { LocalFree(self.0 as isize); } }
+    }
+
     let mut name:Vec<u16>=path.as_os_str().encode_wide().chain(Some(0)).collect();let mut descriptor=std::ptr::null_mut();let mut acl=std::ptr::null_mut();
     assert_eq!(unsafe{GetNamedSecurityInfoW(name.as_mut_ptr(),1,4,std::ptr::null_mut(),std::ptr::null_mut(),&mut acl,std::ptr::null_mut(),&mut descriptor)},0);
-    let mut text=std::ptr::null_mut();let mut size=0;
-    assert_ne!(unsafe{ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor,1,4,&mut text,&mut size)},0);
-    let result=String::from_utf16_lossy(unsafe{std::slice::from_raw_parts(text,size.saturating_sub(1) as usize)});
-    unsafe{LocalFree(text as isize);LocalFree(descriptor as isize);}result
+    let _descriptor = LocalAllocation(descriptor);
+    assert!(!acl.is_null(), "DACL must exist");
+    if protected {
+        let mut control = 0;
+        let mut revision = 0;
+        assert_ne!(unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }, 0);
+        assert_ne!(control & SE_DACL_PROTECTED, 0, "directory DACL must be protected");
+    }
+
+    let mut information = AclSizeInformation { ace_count: 0, bytes_in_use: 0, bytes_free: 0 };
+    let size = std::mem::size_of::<AclSizeInformation>() as u32;
+    assert_ne!(unsafe { GetAclInformation(acl, &mut information, size, ACL_SIZE_INFORMATION_CLASS) }, 0);
+    assert_eq!(information.ace_count, 1, "DACL must have exactly one ACE");
+
+    let mut ace = std::ptr::null_mut();
+    assert_ne!(unsafe { GetAce(acl, 0, &mut ace) }, 0);
+    assert_eq!(unsafe { (*ace).ace_type }, ACCESS_ALLOWED_ACE_TYPE, "ACE must grant access");
+    let sid_text: Vec<u16> = expected_sid.encode_utf16().chain(Some(0)).collect();
+    let mut sid = std::ptr::null_mut();
+    assert_ne!(unsafe { ConvertStringSidToSidW(sid_text.as_ptr(), &mut sid) }, 0);
+    let sid = LocalAllocation(sid);
+    let trustee = unsafe { std::ptr::addr_of!((*ace).sid_start) };
+    assert_ne!(unsafe { EqualSid(trustee.cast(), sid.0) }, 0, "ACE must grant access to the current user");
 }
 fn current_sid()->String {
     let out=Command::new("whoami").args(["/user","/fo","csv","/nh"]).creation_flags(NO_WINDOW).output().unwrap();assert!(out.status.success());
@@ -96,11 +142,9 @@ fn resident_auth_stdio_eof_shutdown_restart_and_stale_fallback() {
     let token=info["token"].as_str().unwrap().to_owned();assert_eq!(token.len(),64);
     assert_eq!(info["version"],1);
     let folder=root.path.join("Screenmate").join("mcp");let meta=folder.join("daemon.json");
-    let directory_acl=dacl(&folder);let file_acl=dacl(&meta);let sid=current_sid();
-    assert!(directory_acl.starts_with("D:P"),"daemon directory DACL must be protected");
-    assert!(directory_acl.contains(&sid) && file_acl.contains(&sid),"directory and file must grant current user access");
-    assert_eq!(directory_acl.matches("(A;").count(),1,"directory must have only one allow ACE");
-    assert_eq!(file_acl.matches("(A;").count(),1,"metadata must have only one allow ACE");
+    let sid = current_sid();
+    assert_user_only_dacl(&folder, &sid, true);
+    assert_user_only_dacl(&meta, &sid, false);
     assert_eq!(daemon_auth(&info,&"0".repeat(64))["ok"],false);
     assert_eq!(daemon_auth(&info,&token)["ok"],true);
     // A single oversized request closes only this connection, not the daemon.
