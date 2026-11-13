@@ -296,6 +296,8 @@ fn privacy_dialog(ctx:&egui::Context,state:&Shared,picker:&mut PrivacyPicker,ope
     let content_width=(ctx.screen_rect().width()-64.0).clamp(240.0,432.0);
     let content_height=(ctx.screen_rect().height()-64.0).clamp(300.0,488.0);
     let mut update=None;let mut choose=false;let mut close=false;
+    let mut visible_only = state.lock().ok().map(|state| state.config.visible_only);
+    let mut mode_changed = false;
     let title_text=language.text("Скрывать приложения","Hide apps");
     let frame=egui::Frame::none().fill(theme.bg).rounding(20.0)
         .stroke(Stroke::new(1.0_f32,theme.edge)).inner_margin(egui::Margin::same(metrics::MD));
@@ -316,9 +318,21 @@ fn privacy_dialog(ctx:&egui::Context,state:&Shared,picker:&mut PrivacyPicker,ope
                     if response.clicked(){close=true;}
                 });
                 ui.add_space(metrics::XS);
-                ui.add(egui::Label::new(label(language.text(
-                    "Выберите приложения для маски. Правила по названиям окон также действуют.",
-                    "Choose apps to mask. Window-title rules still apply."),12.0)).wrap(true));
+                ui.horizontal(|ui| {
+                    let name = language.text("Только если видно ≥ 50%", "Only when ≥ 50% visible");
+                    let hint = language.text(
+                        "При включённом режиме маска закрывает видимые части окна, если на мониторе видно не меньше половины. При выключенном режиме маска закрывает окно целиком, даже если поверх него есть другие окна.",
+                        "With this on, the mask covers exposed parts if at least half of the window on the monitor is visible. With this off, the mask covers the whole window even when other windows overlap it.",
+                    );
+                    let label_width = (ui.available_width() - 48.0 - ui.spacing().item_spacing.x).max(0.0);
+                    ui.add_sized([label_width, 28.0], egui::Label::new(label(name, 13.0)).truncate(true)).on_hover_text(hint);
+                    if let Some(visible_only) = &mut visible_only {
+                        let response = switch(ui, visible_only, theme, name);
+                        ui.ctx().accesskit_node_builder(response.id, |node| node.add_action(egui::accesskit::Action::Default));
+                        mode_changed = response.changed();
+                        response.on_hover_text(hint);
+                    }
+                });
                 ui.add_space(metrics::SM);
                 let search_name=language.text("Поиск приложения","Search apps");
                 let search_id=ui.make_persistent_id("privacy-search");
@@ -401,6 +415,12 @@ fn privacy_dialog(ctx:&egui::Context,state:&Shared,picker:&mut PrivacyPicker,ope
             });
         });
     if ctx.input(|input|input.key_pressed(egui::Key::Escape)) {close=true;}
+    if let Some(visible_only) = visible_only.filter(|_| mode_changed) {
+        let result = state.lock()
+            .map_err(|_| language.text("Ошибка состояния", "State is unavailable").to_owned())
+            .and_then(|mut state| crate::privacy::set_visible_only(&mut state, visible_only));
+        picker.error = result.err();
+    }
     if let Some((name,checked))=update {
         match save_privacy_choice(state,&name,checked,language) {
             Ok(())=>{if let Some(app)=picker.apps.iter_mut().find(|a|a.executable.eq_ignore_ascii_case(&name)){app.selected=checked;}picker.error=None;},

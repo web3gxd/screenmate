@@ -260,7 +260,7 @@ mod tests {
     use super::*;
     fn state()->super::super::State {
         super::super::State {
-            config:super::super::Config {blocked_titles:vec![],blocked_processes:vec![],user_blocked_processes:vec![],ring_size:5,jpeg_quality:70,max_width:1920},
+            config:super::super::Config {blocked_titles:vec![],blocked_processes:vec![],user_blocked_processes:vec![],visible_only:false,ring_size:5,jpeg_quality:70,max_width:1920},
             paused:false,monitor:None,window:None,region:None,frames:std::collections::VecDeque::new(),last_look:Some(42),inbox:vec![],
             accent:[90,197,235],glow_enabled:true,glow_preference:true,minimize_to_tray:true,error:String::new(),language:Language::Ru,capture_activity:std::sync::Arc::new(std::sync::Mutex::new(crate::activity::CaptureActivity::default())),
         }

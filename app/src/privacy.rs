@@ -7,7 +7,11 @@ use super::i18n::Language;
 const MAX_FILE:u64=1024*1024;
 #[derive(Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MaskFile { blocked_processes:Vec<String> }
+struct MaskFile {
+    blocked_processes: Vec<String>,
+    #[serde(default)]
+    visible_only: bool,
+}
 
 #[derive(Clone,Debug)]
 pub struct PrivacyApp {pub executable:String,pub configured:bool,pub selected:bool,pub running:bool}
@@ -30,6 +34,9 @@ fn executable_name_for(value:&str,language:Language)->Result<String,String> {
 fn base_matches(config:&super::Config,exe:&str)->bool {
     config.blocked_processes.iter().any(|rule|!rule.is_empty()&&exe.contains(&rule.to_lowercase()))
 }
+fn screenmate_executable(exe: &str) -> bool {
+    exe.eq_ignore_ascii_case("screenmate.exe")
+}
 
 // This is a presentation filter only: it never participates in capture
 // authorization or in matching protected windows. Explicit rules are always
@@ -47,7 +54,7 @@ fn apps_from_running(config:&super::Config,language:Language,running:BTreeSet<St
     // Base rules may be substrings rather than full .exe names. Keep them
     // visible as immutable rules even if no matching process is running.
     for rule in &config.blocked_processes {if !rule.is_empty(){names.insert(rule.to_lowercase());}}
-    Ok(names.into_iter().map(|executable| {
+    Ok(names.into_iter().filter(|exe| !screenmate_executable(exe)).map(|executable| {
         let configured=base_matches(config,&executable);
         let selected=configured||config.user_blocked_processes.iter().any(|item|item.to_lowercase()==executable);
         let running=running.contains(&executable);
@@ -59,22 +66,26 @@ fn apps_from_running(config:&super::Config,language:Language,running:BTreeSet<St
 /// filesystem paths. Include explicitly saved apps even when they are closed.
 pub fn apps(config:&super::Config,language:Language)->Result<Vec<PrivacyApp>,String> {
     let mut running=BTreeSet::new();
-    for w in super::windows().map_err(|_|language.text("Не удалось получить список приложений","Could not list applications").to_owned())? {if let Ok(name)=executable_name(&w.process){running.insert(name);}}
+    for w in super::windows().map_err(|_|language.text("Не удалось получить список приложений","Could not list applications").to_owned())? {
+        if !w.own {
+            if let Ok(name)=executable_name(&w.process){running.insert(name);}
+        }
+    }
     apps_from_running(config,language,running)
 }
 
 #[cfg(test)]
 fn load_user_masks(path:&Path)->Result<Vec<String>,String> {
-    load_user_masks_for(path,Language::Ru)
+    load_preferences(path,Language::Ru).map(|(names, _)| names)
 }
-pub fn load_user_masks_for(path:&Path,language:Language)->Result<Vec<String>,String> {
+pub fn load_preferences(path:&Path,language:Language)->Result<(Vec<String>, bool),String> {
     let read_error=language.text("Не удалось прочитать список защищённых приложений","Could not read the protected applications list");
-    let file=match fs::File::open(path) {Ok(f)=>f,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok(Vec::new()),Err(e)=>return Err(format!("{read_error}: {e}"))};
+    let file=match fs::File::open(path) {Ok(f)=>f,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>return Ok((Vec::new(), false)),Err(e)=>return Err(format!("{read_error}: {e}"))};
     let mut bytes=Vec::new();file.take(MAX_FILE+1).read_to_end(&mut bytes).map_err(|e|format!("{read_error}: {e}"))?;
     if bytes.len() as u64>MAX_FILE {return Err(language.text("Список защищённых приложений слишком большой","The protected applications list is too large").into());}
     let saved:MaskFile=serde_yaml::from_slice(&bytes).map_err(|e|format!("{}: {e}",language.text("Ошибка списка защищённых приложений","Invalid protected applications list")))?;
     let mut names=BTreeSet::new();for name in saved.blocked_processes {names.insert(executable_name_for(&name,language)?);}
-    Ok(names.into_iter().collect())
+    Ok((names.into_iter().collect(), saved.visible_only))
 }
 
 #[cfg(windows)]
@@ -89,11 +100,11 @@ fn replace_file(source:&Path,destination:&Path,language:Language)->Result<(),Str
 #[cfg(not(windows))]
 fn replace_file(source:&Path,destination:&Path,_language:Language)->Result<(),String> {fs::rename(source,destination).map_err(|e|e.to_string())}
 
-fn save_user_masks_for(path:&Path,names:&[String],language:Language)->Result<(),String> {
+fn save_preferences(path:&Path,names:&[String],visible_only:bool,language:Language)->Result<(),String> {
     let parent=path.parent().ok_or(language.text("Не найдена папка настроек","Settings folder not found"))?;
     let temp=parent.join(format!(".blocked-apps-{}.tmp",uuid::Uuid::new_v4().simple()));
     let result=(|| {
-        let content=serde_yaml::to_string(&MaskFile {blocked_processes:names.to_vec()}).map_err(|e|e.to_string())?;
+        let content=serde_yaml::to_string(&MaskFile {blocked_processes:names.to_vec(), visible_only}).map_err(|e|e.to_string())?;
         if content.len() as u64>MAX_FILE {return Err(language.text("Список защищённых приложений слишком большой","The protected applications list is too large").into());}
         let save_error=language.text("Не удалось сохранить список защищённых приложений","Could not save the protected applications list");
         let mut file=OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e|format!("{save_error}: {e}"))?;
@@ -110,15 +121,35 @@ pub fn set_user_mask(state:&mut super::State,process:&str,checked:bool)->Result<
     let path=super::dir().map_err(|_|state.language.text("Не найдена папка настроек","Settings folder not found").to_owned())?.join("blocked-apps.yaml");
     set_user_mask_at(state,&path,process,checked)
 }
+pub fn set_visible_only(state: &mut super::State, visible_only: bool) -> Result<(), String> {
+    let path = super::dir().map_err(|_|state.language.text("Не найдена папка настроек","Settings folder not found").to_owned())?.join("blocked-apps.yaml");
+    set_visible_only_at(state, &path, visible_only)
+}
+fn set_visible_only_at(state: &mut super::State, path: &Path, visible_only: bool) -> Result<(), String> {
+    let (mut names, _) = load_preferences(path, state.language)?;
+    names.extend(state.config.user_blocked_processes.iter().cloned());
+    names.sort_unstable();
+    names.dedup();
+    save_preferences(path, &names, visible_only, state.language)?;
+    state.config.user_blocked_processes = names;
+    state.config.visible_only = visible_only;
+    state.frames.clear();
+    state.last_look = None;
+    Ok(())
+}
 fn set_user_mask_at(state:&mut super::State,path:&Path,process:&str,checked:bool)->Result<(),String> {
     let language=state.language;
     let name=executable_name_for(process,language)?;
+    if checked && screenmate_executable(&name) {
+        return Err(language.text("Окно Скринмейта всегда остаётся видимым","ScreenMate's window is always visible").into());
+    }
     if !checked && base_matches(&state.config,&name) {return Err(language.text("Это приложение защищено базовыми правилами config.yaml","This application is protected by the base config.yaml rules").into());}
-    let mut names:BTreeSet<String>=load_user_masks_for(path,language)?.into_iter().collect();
+    let (saved, _) = load_preferences(path, language)?;
+    let mut names:BTreeSet<String>=saved.into_iter().collect();
     for previous in &state.config.user_blocked_processes {names.insert(executable_name_for(previous,language)?);}
     if checked {names.insert(name);} else {names.remove(&name);}
     let next:Vec<String>=names.into_iter().collect();
-    save_user_masks_for(path,&next,language)?;
+    save_preferences(path,&next,state.config.visible_only,language)?;
     state.config.user_blocked_processes=next;
     // Frames made under the previous policy must never linger in the ring.
     state.frames.clear();state.last_look=None;
@@ -164,7 +195,7 @@ mod tests {
     impl Drop for TestDir {fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}}
     fn state()->super::super::State {
         super::super::State {
-            config:super::super::Config {blocked_titles:vec!["банк".into()],blocked_processes:vec!["secret.exe".into()],user_blocked_processes:vec![],ring_size:5,jpeg_quality:70,max_width:1920},
+            config:super::super::Config {blocked_titles:vec!["банк".into()],blocked_processes:vec!["secret.exe".into()],user_blocked_processes:vec![],visible_only:false,ring_size:5,jpeg_quality:70,max_width:1920},
             paused:false,monitor:None,window:None,region:None,frames:std::collections::VecDeque::new(),last_look:Some(42),inbox:vec![],accent:[90,197,235],glow_enabled:true,glow_preference:true,minimize_to_tray:true,error:String::new(),language:Language::Ru,capture_activity:std::sync::Arc::new(std::sync::Mutex::new(crate::activity::CaptureActivity::default())),
         }
     }
@@ -175,23 +206,24 @@ mod tests {
     }
     #[test] fn service_filter_affects_suggestions_only_and_preserves_explicit_masks() {
         let mut s=state();
-        let running:BTreeSet<_>=["svchost.exe","textinputhost.exe","nvidia overlay.exe","editor.exe"].into_iter().map(str::to_owned).collect();
+        let running:BTreeSet<_>=["svchost.exe","textinputhost.exe","nvidia overlay.exe","editor.exe","screenmate.exe"].into_iter().map(str::to_owned).collect();
         let list=apps_from_running(&s.config,Language::Ru,running.clone()).unwrap();
         assert!(list.iter().any(|a|a.executable=="editor.exe" && a.running));
-        for name in ["svchost.exe","textinputhost.exe","nvidia overlay.exe"] {assert!(!list.iter().any(|a|a.executable==name));}
+        for name in ["svchost.exe","textinputhost.exe","nvidia overlay.exe","screenmate.exe"] {assert!(!list.iter().any(|a|a.executable==name));}
         s.config.blocked_processes.push("svchost".into());
         s.config.user_blocked_processes.push("nvidia overlay.exe".into());
         let list=apps_from_running(&s.config,Language::Ru,running).unwrap();
         assert!(list.iter().any(|a|a.executable=="svchost" && a.configured));
         assert!(list.iter().any(|a|a.executable=="svchost.exe" && a.configured && a.running));
         assert!(list.iter().any(|a|a.executable=="nvidia overlay.exe" && a.selected && a.running));
-        let protected=super::super::Window {id:1,title:String::new(),process:"NVIDIA Overlay.EXE".into(),x:0,y:0,width:2,height:2};
+        let protected=super::super::Window {id:1,title:String::new(),process:"NVIDIA Overlay.EXE".into(),x:0,y:0,width:2,height:2,own:false,occlusion_rect:None};
         assert!(super::super::blocked(&protected,&s.config),"a filtered process must still be masked");
     }
     #[test] fn save_reload_add_remove_preserves_base_rules_and_other_entries() {
         let dir=TestDir::new();let file=dir.0.join("blocked-apps.yaml");let config=dir.0.join("config.yaml");
         let original=b"blocked_titles: [bank]\nblocked_processes: [secret.exe]\n# keep this comment\n";fs::write(&config,original).unwrap();
-        save_user_masks_for(&file,&["other.exe".into()],Language::Ru).unwrap();
+        fs::write(&file,b"blocked_processes: [other.exe]\n").unwrap();
+        assert!(!load_preferences(&file, Language::Ru).unwrap().1);
         let mut s=state();s.config.user_blocked_processes.push("keep.exe".into());
         set_user_mask_at(&mut s,&file,"APP.EXE",true).unwrap();
         assert_eq!(load_user_masks(&file).unwrap(),vec!["app.exe","keep.exe","other.exe"]);
@@ -201,11 +233,19 @@ mod tests {
         set_user_mask_at(&mut s,&file,"app.exe",false).unwrap();
         assert_eq!(load_user_masks(&file).unwrap(),vec!["keep.exe","other.exe"]);
         assert!(set_user_mask_at(&mut s,&file,"secret.exe",false).is_err());
-        assert_eq!(load_user_masks(&file).unwrap(),vec!["keep.exe","other.exe"]);
+        s.last_look = Some(42);
+        set_visible_only_at(&mut s, &file, true).unwrap();
+        assert!(s.config.visible_only);
+        assert!(s.last_look.is_none());
+        assert!(set_user_mask_at(&mut s,&file,"ScreenMate.exe",true).is_err());
+        set_user_mask_at(&mut s, &file, "new.exe", true).unwrap();
+        assert_eq!(load_preferences(&file, Language::Ru).unwrap(), (vec!["keep.exe".into(), "new.exe".into(), "other.exe".into()], true));
     }
     #[test] fn failed_save_and_corrupt_file_do_not_change_runtime_protection() {
         let dir=TestDir::new();let mut s=state();s.config.user_blocked_processes=vec!["keep.exe".into()];
         let missing=dir.0.join("missing").join("blocked-apps.yaml");
+        assert!(set_visible_only_at(&mut s, &missing, true).is_err());
+        assert!(!s.config.visible_only);
         assert!(set_user_mask_at(&mut s,&missing,"new.exe",true).is_err());
         assert_eq!(s.config.user_blocked_processes,vec!["keep.exe"]);assert_eq!(s.last_look,Some(42));
         let corrupt=dir.0.join("blocked-apps.yaml");fs::write(&corrupt,b"invalid: [").unwrap();

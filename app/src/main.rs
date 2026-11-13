@@ -21,11 +21,15 @@ use serde_json::{json, Value};
 use tiny_http::{Header, Response, Server, StatusCode};
 use windows_sys::Win32::{Foundation::{BOOL, HWND, LPARAM, RECT}, System::{StationsAndDesktops::{CloseDesktop, GetUserObjectInformationW, OpenInputDesktop, UOI_NAME}, Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION}}, UI::{Input::KeyboardAndMouse::{RegisterHotKey, MOD_CONTROL, MOD_SHIFT}, WindowsAndMessaging::{EnumWindows, GetClassNameW, GetMessageW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, MSG, WM_HOTKEY}}};
 use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::{
+    Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
+    UI::WindowsAndMessaging::{GetShellWindow, GetWindowDisplayAffinity, GetWindowLongW, IsIconic, GWL_EXSTYLE, WS_EX_LAYERED, WS_EX_TRANSPARENT},
+};
 
 #[derive(Clone, Deserialize)]
-struct Config { blocked_titles: Vec<String>, blocked_processes: Vec<String>, #[serde(skip)] user_blocked_processes: Vec<String>, ring_size: usize, jpeg_quality: u8, max_width: u32 }
+struct Config { blocked_titles: Vec<String>, blocked_processes: Vec<String>, #[serde(skip)] user_blocked_processes: Vec<String>, #[serde(skip)] visible_only: bool, ring_size: usize, jpeg_quality: u8, max_width: u32 }
 #[derive(Clone, Serialize, PartialEq, Eq)]
-struct Window { id: i64, title: String, process: String, x: i32, y: i32, width: i32, height: i32 }
+struct Window { id: i64, title: String, process: String, x: i32, y: i32, width: i32, height: i32, #[serde(skip)] own: bool, #[serde(skip)] occlusion_rect: Option<[i32; 4]> }
 #[derive(Clone, Serialize)]
 struct Monitor { #[serde(serialize_with = "id_as_string")] id: u32, name: String, x: i32, y: i32, width: u32, height: u32, primary: bool }
 #[derive(Clone)]
@@ -61,17 +65,36 @@ fn visible_window_rect_available(ok:bool,r:&RECT)->Result<bool,String> {
     Ok(width>0 && height>0)
 }
 unsafe extern "system" fn collect_window(hwnd: HWND, param: LPARAM) -> BOOL {
-    if IsWindowVisible(hwnd) == 0 { return 1; }
+    if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 { return 1; }
+    let mut cloaked = 0u32;
+    let cloak_status = DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED as u32, (&mut cloaked as *mut u32).cast(), 4);
+    if cloak_status >= 0 && cloaked != 0 { return 1; }
     let mut r: RECT = std::mem::zeroed();
     match visible_window_rect_available(GetWindowRect(hwnd, &mut r)!=0,&r) {Ok(true)=>{},Ok(false)=>return 1,Err(_)=>return 0}
     let mut pid = 0; GetWindowThreadProcessId(hwnd, &mut pid);
+    let mut class = [0u16; 128];
+    let n = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+    let class = String::from_utf16_lossy(&class[..n]);
+    let own = pid == std::process::id();
+    if own && class == "ScreenmateCaptureOverlay" { return 1; }
+    let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+    let mut affinity = 0;
+    let excluded = GetWindowDisplayAffinity(hwnd, &mut affinity) != 0 && affinity != 0;
+    let mut frame: RECT = std::mem::zeroed();
+    let occlusion_rect = if cloak_status >= 0 && !excluded && hwnd != GetShellWindow()
+        && !matches!(class.as_str(), "Progman" | "WorkerW")
+        && style & (WS_EX_LAYERED | WS_EX_TRANSPARENT) == 0
+        && DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS as u32, (&mut frame as *mut RECT).cast(), std::mem::size_of::<RECT>() as u32) >= 0
+    {
+        // Ignore the outer edge, which can include rounded corners.
+        Some([frame.left.saturating_add(12), frame.top.saturating_add(12),
+              frame.right.saturating_sub(12), frame.bottom.saturating_sub(12)])
+    } else { None };
     // GetWindowText on our own GUI thread synchronously sends WM_GETTEXT. The
     // capture worker holds the shared lock, so that would deadlock against UI.
-    if pid == std::process::id() {
-        let mut class=[0u16;128]; let n=GetClassNameW(hwnd,class.as_mut_ptr(),class.len() as i32).max(0) as usize;
-        if String::from_utf16_lossy(&class[..n]) == "ScreenmateCaptureOverlay" { return 1; }
+    if own {
         let v = &mut *(param as *mut Vec<Window>);
-        v.push(Window { id:hwnd as i64, title:"[Скринмейт]".into(), process:String::new(), x:r.left, y:r.top, width:r.right-r.left, height:r.bottom-r.top });
+        v.push(Window { id:hwnd as i64, title:"[Скринмейт]".into(), process:"screenmate.exe".into(), x:r.left, y:r.top, width:r.right-r.left, height:r.bottom-r.top, own, occlusion_rect });
         return 1;
     }
     let len = GetWindowTextLengthW(hwnd).max(0) as usize;
@@ -85,16 +108,13 @@ unsafe extern "system" fn collect_window(hwnd: HWND, param: LPARAM) -> BOOL {
         if ok == 0 { String::new() } else { String::from_utf16_lossy(&p[..n as usize]).rsplit(['\\','/']).next().unwrap_or("").to_string() }
     };
     let v = &mut *(param as *mut Vec<Window>);
-    v.push(Window { id:hwnd as i64, title, process, x:r.left, y:r.top, width:r.right-r.left, height:r.bottom-r.top });
+    v.push(Window { id:hwnd as i64, title, process, x:r.left, y:r.top, width:r.right-r.left, height:r.bottom-r.top, own, occlusion_rect });
     1
 }
 fn sort_window_snapshot(windows:&mut [Window]) { windows.sort_unstable_by_key(|w|w.id); }
 fn windows() -> Result<Vec<Window>, String> {
     let mut result = Vec::new();
     if unsafe { EnumWindows(Some(collect_window), &mut result as *mut _ as LPARAM) } == 0 { return Err("Не удалось проверить открытые окна".into()); }
-    // Z-order is not relevant for masking: all protected rectangles are
-    // obscured. Keep every field in the comparison, but normalize order.
-    sort_window_snapshot(&mut result);
     Ok(result)
 }
 // A locked workstation switches away from the interactive Default desktop; fail closed on errors.
@@ -109,18 +129,61 @@ fn desktop_available() -> bool { unsafe {
     String::from_utf16_lossy(&data[..n]).eq_ignore_ascii_case("Default")
 } }
 fn blocked(w: &Window, cfg: &Config) -> bool {
+    if w.own { return false; }
     let title = w.title.to_lowercase(); let process = w.process.to_lowercase();
     // A window with an inaccessible process is conservatively masked.
     process.is_empty() || cfg.blocked_titles.iter().any(|s| !s.is_empty() && title.contains(&s.to_lowercase())) || cfg.blocked_processes.iter().any(|s| !s.is_empty() && process.contains(&s.to_lowercase())) || cfg.user_blocked_processes.iter().any(|s|process==s.to_lowercase())
 }
+// Rectangles use half-open coordinates [left, top, right, bottom].
+type MaskRect = [i64; 4];
+
+fn intersection(a: MaskRect, b: MaskRect) -> Option<MaskRect> {
+    let overlap = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    (overlap[0] < overlap[2] && overlap[1] < overlap[3]).then_some(overlap)
+}
+
+fn visible_parts(bounds: MaskRect, covers: impl Iterator<Item = MaskRect>) -> Option<Vec<MaskRect>> {
+    let mut parts = vec![bounds];
+    for cover in covers {
+        let mut remaining = Vec::new();
+        for part @ [left, top, right, bottom] in parts {
+            if let Some([x0, y0, x1, y1]) = intersection(part, cover) {
+                remaining.extend([
+                    [left, top, right, y0], [left, y1, right, bottom],
+                    [left, y0, x0, y1], [x1, y0, right, y1],
+                ].into_iter().filter(|r| r[0] < r[2] && r[1] < r[3]));
+            } else {
+                remaining.push(part);
+            }
+        }
+        // Fall back to masking when the desktop geometry becomes too complex.
+        if remaining.len() > 1024 { return None; }
+        parts = remaining;
+        if parts.is_empty() { break; }
+    }
+    Some(parts)
+}
+
 fn mask_protected_windows(image:&mut RgbaImage,origin_x:i32,origin_y:i32,windows:&[Window],config:&Config) {
-    for w in windows {
+    let (ox, oy) = (i64::from(origin_x), i64::from(origin_y));
+    let screen = [ox, oy, ox + i64::from(image.width()), oy + i64::from(image.height())];
+    let area = |r: MaskRect| (r[2] - r[0]) as u64 * (r[3] - r[1]) as u64;
+    for (index, w) in windows.iter().enumerate() {
         if !blocked(w,config) {continue;}
-        let x0=(w.x as i64-origin_x as i64).clamp(0,image.width() as i64) as u32;
-        let y0=(w.y as i64-origin_y as i64).clamp(0,image.height() as i64) as u32;
-        let x1=(w.x as i64+w.width as i64-origin_x as i64).clamp(0,image.width() as i64) as u32;
-        let y1=(w.y as i64+w.height as i64-origin_y as i64).clamp(0,image.height() as i64) as u32;
-        for y in y0..y1 {for x in x0..x1 {image.put_pixel(x,y,Rgba([0,0,0,255]));}}
+        let (x, y) = (i64::from(w.x), i64::from(w.y));
+        let Some(bounds) = intersection(screen, [x, y, x + i64::from(w.width), y + i64::from(w.height)]) else { continue; };
+        let covers = windows[..index].iter()
+            .filter(|above| config.visible_only || above.own)
+            .filter_map(|above| above.occlusion_rect.map(|rect| rect.map(i64::from)));
+        let parts = visible_parts(bounds, covers).unwrap_or_else(|| vec![bounds]);
+        if config.visible_only && parts.iter().copied().map(area).sum::<u64>() < area(bounds).div_ceil(2) { continue; }
+        for [x0, y0, x1, y1] in parts {
+            for y in (y0 - oy) as u32..(y1 - oy) as u32 {
+                for x in (x0 - ox) as u32..(x1 - ox) as u32 {
+                    image.put_pixel(x, y, Rgba([0, 0, 0, 255]));
+                }
+            }
+        }
     }
 }
 fn hash(img: &RgbaImage) -> u64 {
@@ -134,9 +197,14 @@ fn capture(state: &mut State, monitor_override: Option<u32>, region_override: Op
     let id = monitor_override.or(state.monitor);
     let screen = screens.into_iter().find(|s| id.map_or(s.display_info.is_primary, |id| s.display_info.id == id)).ok_or("Монитор недоступен")?;
     let d = screen.display_info;
-    let before = windows()?;
+    let mut before = windows()?;
     let mut image = screen.capture().map_err(|e| e.to_string())?;
-    let after = windows()?;
+    let mut after = windows()?;
+    let order_matters = state.config.visible_only || before.iter().any(|window| window.own);
+    if !order_matters {
+        sort_window_snapshot(&mut before);
+        sort_window_snapshot(&mut after);
+    }
     if before != after { return Err("Окна изменились во время захвата; повторите запрос".into()); }
     if !desktop_available() { state.paused=true; state.frames.clear(); return Err("Экран заблокирован".into()); }
     // Windows coordinates and the capture surface must share physical pixels.
@@ -253,7 +321,7 @@ fn run() -> Result<(),String> {
     let session=path.join("session.json"); let _=fs::remove_file(&session);
     let config_path=path.join("config.yaml"); if !config_path.exists() { fs::write(&config_path,include_str!("../config.yaml")).map_err(|e|e.to_string())?; }
     let mut config:Config=serde_yaml::from_slice(&fs::read(&config_path).map_err(|e|e.to_string())?).map_err(|e|format!("{}: {e}",language.text("Ошибка config.yaml","config.yaml error")))?;
-    config.user_blocked_processes=privacy::load_user_masks_for(&path.join("blocked-apps.yaml"),language)?;
+    (config.user_blocked_processes, config.visible_only) = privacy::load_preferences(&path.join("blocked-apps.yaml"), language)?;
     if config.ring_size==0 || config.ring_size>100 || config.max_width==0 || config.max_width>7680 || config.jpeg_quality==0 || config.jpeg_quality>100 { return Err(language.text("Неверные ограничения config.yaml","Invalid config.yaml limits").into()); }
     let autostart_error=autostart::initialize(language).err();
     let state=Arc::new(Mutex::new(State { config, paused:false, monitor:None,window:None,region:None,frames:VecDeque::new(),last_look:None,inbox:Vec::new(),accent,glow_enabled,glow_preference,minimize_to_tray,language,error:String::new(),capture_activity:Arc::new(Mutex::new(activity::CaptureActivity::default())) }));
@@ -300,8 +368,8 @@ fn main() { if let Err(e)=run() { let text:Vec<u16>=format!("{e}\0").encode_utf1
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn config() -> Config { Config { blocked_titles: vec!["банк".into()], blocked_processes: vec!["secret.exe".into()], user_blocked_processes:vec![], ring_size:5,jpeg_quality:70,max_width:1920 } }
-    fn window(title: &str,process:&str) -> Window { Window { id:1,title:title.into(),process:process.into(),x:0,y:0,width:10,height:10 } }
+    fn config() -> Config { Config { blocked_titles: vec!["банк".into()], blocked_processes: vec!["secret.exe".into()], user_blocked_processes:vec![], visible_only:false, ring_size:5,jpeg_quality:70,max_width:1920 } }
+    fn window(title: &str,process:&str) -> Window { Window { id:1,title:title.into(),process:process.into(),x:0,y:0,width:10,height:10,own:false,occlusion_rect:None } }
     #[test] fn masks_protected_and_unknown_processes() { let c=config(); assert!(blocked(&window("Мой БАНК", "browser.exe"), &c)); assert!(blocked(&window("обычное", "Secret.EXE"), &c)); assert!(blocked(&window("обычное", ""), &c)); assert!(!blocked(&window("обычное", "editor.exe"), &c)); }
     #[test] fn unknown_visible_window_geometry_fails_closed() {
         let mut r=RECT {left:10,top:10,right:20,bottom:20};
@@ -313,8 +381,8 @@ mod tests {
     #[test] fn masks_intersection_on_synthetic_negative_coordinate_monitor() {
         let mut c=config();c.user_blocked_processes=vec!["finance.exe".into()];
         let original=Rgba([90,130,170,255]);let mut image=RgbaImage::from_pixel(6,4,original);
-        let protected=Window {id:1,title:"Счёт".into(),process:"FINANCE.EXE".into(),x:-102,y:11,width:5,height:2};
-        let allowed=Window {id:2,title:"Обычное".into(),process:"editor.exe".into(),x:-96,y:10,width:2,height:4};
+        let protected=Window {x:-102,y:11,width:5,height:2,..window("Счёт","FINANCE.EXE")};
+        let allowed=Window {id:2,x:-96,y:10,width:2,height:4,..window("Обычное","editor.exe")};
         mask_protected_windows(&mut image,-100,10,&[protected,allowed],&c);
         for y in 0..4 {for x in 0..6 {
             let expected=if x<3 && (1..3).contains(&y) {Rgba([0,0,0,255])} else {original};
@@ -322,6 +390,40 @@ mod tests {
         }}
         let cropped=image::imageops::crop_imm(&image,2,1,3,2).to_image();
         assert_eq!(*cropped.get_pixel(0,0),Rgba([0,0,0,255]));assert_eq!(*cropped.get_pixel(1,0),original);
+    }
+    #[test]
+    fn visibility_mode_uses_z_order_and_masks_only_exposed_parts_at_half_visible() {
+        let mut config = config();
+        let protected = window("Счёт", "secret.exe");
+        let mut cover = Window {id:2,occlusion_rect:Some([0, 0, 6, 10]),..window("Редактор","editor.exe")};
+        let original = Rgba([90, 130, 170, 255]);
+        let black = Rgba([0, 0, 0, 255]);
+        let render = |config: &Config, windows: &[Window]| {
+            let mut image = RgbaImage::from_pixel(10, 10, original);
+            mask_protected_windows(&mut image, 0, 0, windows, config);
+            image
+        };
+        assert_eq!(*render(&config, &[cover.clone(), protected.clone()]).get_pixel(1, 1), black);
+        config.visible_only = true;
+        assert!(render(&config, &[cover.clone(), protected.clone()]).pixels().all(|p| *p == original));
+        assert!(render(&config, &[protected.clone(), cover.clone()]).pixels().all(|p| *p == black));
+        cover.occlusion_rect = Some([0, 0, 5, 10]);
+        let image = render(&config, &[cover.clone(), protected.clone()]);
+        assert_eq!(*image.get_pixel(4, 5), original);
+        assert_eq!(*image.get_pixel(5, 5), black);
+        let second_cover = Window {id:3,occlusion_rect:Some([4, 0, 10, 10]),..cover.clone()};
+        assert!(render(&config, &[cover, second_cover, protected]).pixels().all(|p| *p == original));
+    }
+    #[test]
+    fn own_window_bypasses_rules_and_is_preserved_above_protected_windows() {
+        let config = config();
+        let own = Window {id:2,own:true,occlusion_rect:Some([0, 0, 5, 10]),..window("Банк","")};
+        assert!(!blocked(&own, &config));
+        let original = Rgba([90, 130, 170, 255]);
+        let mut image = RgbaImage::from_pixel(10, 10, original);
+        mask_protected_windows(&mut image, 0, 0, &[own, window("Счёт","secret.exe")], &config);
+        assert_eq!(*image.get_pixel(4, 5), original);
+        assert_eq!(*image.get_pixel(5, 5), Rgba([0, 0, 0, 255]));
     }
     #[test] fn snapshots_ignore_z_order_but_not_content_or_geometry() {
         let first=window("Первое","a.exe");let mut second=window("Второе","b.exe");second.id=2;

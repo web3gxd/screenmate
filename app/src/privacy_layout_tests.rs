@@ -18,7 +18,7 @@ pub(super) struct PrivacyLayoutGeometry {
 
 fn app_state(language:crate::i18n::Language)->Shared {
     Arc::new(Mutex::new(State {
-        config:Config {blocked_titles:vec![],blocked_processes:vec!["base.exe".into()],user_blocked_processes:vec![],ring_size:5,jpeg_quality:70,max_width:1920},
+        config:Config {blocked_titles:vec![],blocked_processes:vec!["base.exe".into()],user_blocked_processes:vec![],visible_only:false,ring_size:5,jpeg_quality:70,max_width:1920},
         paused:false,monitor:None,window:None,region:None,frames:VecDeque::new(),last_look:None,inbox:vec![],
         accent:[90,197,235],glow_enabled:true,glow_preference:true,minimize_to_tray:true,language,error:String::new(),
         capture_activity:Arc::new(Mutex::new(crate::activity::CaptureActivity::default())),
@@ -160,6 +160,10 @@ fn picker_retains_accessibility_for_base_rule_and_long_names() {
         for _ in 0..2 {let _=frame(&ctx,&state,&mut picker,language,size);}
         let output=frame(&ctx,&state,&mut picker,language,size);
         let tree=output.platform_output.accesskit_update.expect("picker accessibility tree");
+        let mode_name = language.text("Только если видно ≥ 50%", "Only when ≥ 50% visible");
+        let mode = tree.nodes.iter().find(|(_, node)| node.name() == Some(mode_name) && node.role() == Role::CheckBox).expect("masking mode switch");
+        assert_eq!(mode.1.checked(), Some(Checked::False));
+        assert!(mode.1.supports_action(Action::Default));
         let base_name=match language {crate::i18n::Language::Ru=>"Скрывать: base.exe (базовое правило)",crate::i18n::Language::En=>"Hide: base.exe (base rule)"};
         let base=tree.nodes.iter().find(|(_,n)|n.name()==Some(base_name)).expect("base rule checkbox");
         assert_eq!(base.1.role(),Role::CheckBox);
